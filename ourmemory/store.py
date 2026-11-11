@@ -8,14 +8,18 @@ import math
 import sqlite3
 import time
 import uuid
+from array import array
 from typing import Iterable
 
-import numpy as np
+try:  # optional accelerator; the kernel runs on the standard library alone
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised only in no-numpy environments
+    np = None
 
 from .db import Database
 from .text import (
     VECTOR_DIM, clamp, fts_query, fts_query_terms, fts_text, hash_vector,
-    normalize, stable_hash, vector_tokens,
+    normalize, stable_hash, vector_tokens, vectors_matrix,
 )
 
 KINDS = ("episode", "semantic", "preference", "procedure", "plan", "reflection", "utterance")
@@ -26,6 +30,22 @@ DECAY_FLOOR = 0.08
 ARCHIVE_STRENGTH = 0.18
 ARCHIVE_IMPORTANCE = 0.45
 ARCHIVE_AGE_DAYS = 30.0
+
+
+def _pack_vector(vec) -> bytes:
+    """Serialize a float vector to bytes without requiring NumPy."""
+    if np is not None:
+        return np.asarray(vec, dtype=np.float32).tobytes()
+    return array("f", (float(value) for value in vec)).tobytes()
+
+
+def _unpack_vector(blob: bytes):
+    """Deserialize bytes back into a NumPy array or a plain list of floats."""
+    if np is not None:
+        return np.frombuffer(blob, dtype=np.float32)
+    values = array("f")
+    values.frombytes(blob)
+    return values.tolist()
 
 
 class MemoryStore:
@@ -52,7 +72,7 @@ class MemoryStore:
         arousal: float = 0.0,
         emotion: str = "平静",
         orbit: str = "confirmed",
-        embedding: np.ndarray | None = None,
+        embedding: np.ndarray | list[float] | None = None,
         ref: str | None = None,
         meta: dict | None = None,
     ) -> tuple[str, bool]:
@@ -71,7 +91,7 @@ class MemoryStore:
         tokens = fts_text(text + "\n" + summary)
         if embedding is None:
             embedding = hash_vector(text + " " + summary)
-        blob = np.asarray(embedding, dtype=np.float32).tobytes()
+        blob = _pack_vector(embedding)
         meta_json = json.dumps(meta or {}, ensure_ascii=False)
         status = "voided" if orbit == "voided" else "active"
         with self.db.tx():
@@ -383,27 +403,31 @@ class MemoryStore:
             "AND embedding IS NOT NULL"
         )
         ids: list[str] = []
-        vecs: list[np.ndarray] = []
+        vecs: list = []
         width = 0
         for row in rows:
             blob = row["embedding"]
             if not blob:
                 continue
-            vec = np.frombuffer(blob, dtype=np.float32)
-            if vec.size == 0:
+            vec = _unpack_vector(blob)
+            size = int(vec.size) if np is not None else len(vec)
+            if size == 0:
                 continue
             if width == 0:
-                width = vec.size
-            if vec.size != width:
+                width = size
+            if size != width:
                 continue
-            norm = float(np.linalg.norm(vec))
-            if norm <= 0:
-                continue
+            if np is not None:
+                norm = float(np.linalg.norm(vec))
+                if norm <= 0:
+                    continue
+                vecs.append(vec / norm)
+            else:
+                norm = math.sqrt(sum(value * value for value in vec))
+                if norm <= 0:
+                    continue
+                vecs.append([value / norm for value in vec])
             ids.append(str(row["id"]))
-            vecs.append(vec / norm)
-        if not vecs:
-            matrix = np.zeros((0, width or VECTOR_DIM), dtype=np.float32)
-        else:
-            matrix = np.vstack(vecs).astype(np.float32, copy=False)
+        matrix = vectors_matrix(vecs, width or VECTOR_DIM)
         self._vec_cache = (epoch, ids, matrix)
         return ids, matrix

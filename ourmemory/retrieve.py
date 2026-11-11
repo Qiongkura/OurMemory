@@ -9,7 +9,9 @@ import time
 from dataclasses import dataclass, field
 
 from .soul import DEFAULT_SOUL, SoulSpec
-from .text import normalize, token_set
+from .text import (
+    hash_vector, normalize, rank_vectors, token_set, vector_width,
+)
 
 _WEIGHTS = {
     "fts": 1.0,
@@ -325,29 +327,22 @@ class HybridRetriever:
         return [(memory_id, weight) for weight, _pos, memory_id in scored]
 
     def _vector(self, query: str, limit: int) -> list[tuple[str, float]]:
-        if self.embedder is None:
-            return []
         try:
-            vectors = self.embedder([query])
-            if not vectors:
-                return []
-            query_vec = vectors[0]
+            if self.embedder is not None:
+                vectors = self.embedder([query])
+                if not vectors:
+                    return []
+                query_vec = vectors[0]
+            else:
+                # Built-in signed feature hashing: the vector route still works
+                # offline, with no model download and no embedding service.
+                query_vec = hash_vector(query)
             ids, matrix = self.store.vectors()
             if not ids or matrix is None or len(matrix) == 0:
                 return []
-            if matrix.shape[1] != len(query_vec):
+            if vector_width(matrix) != len(query_vec):
                 return []
-            scores = matrix @ query_vec
-            order = scores.argsort()[::-1]
-            out = []
-            for index in order:
-                score = float(scores[int(index)])
-                if score < _VECTOR_FLOOR:
-                    break
-                out.append((ids[int(index)], score))
-                if len(out) >= limit:
-                    break
-            return out
+            return rank_vectors(query_vec, ids, matrix, limit, _VECTOR_FLOOR)
         except Exception as exc:  # noqa: BLE001
             self.logger("vector recall failed: " + type(exc).__name__)
             return []
@@ -430,6 +425,17 @@ class HybridRetriever:
             self.logger("time recall failed: " + type(exc).__name__)
             return []
         if not content:
+            # A bare "what did we do today" asks for the day's episodes and
+            # scene, not every identity slot written today (name, school...).
+            transient = {
+                "location", "activity", "mood", "with", "next",
+                "bot.location", "bot.activity", "bot.mood", "bot.with", "bot.next",
+                "user.location", "user.activity", "user.mood",
+            }
+            rows = [
+                row for row in rows
+                if not row["slot"] or row["slot"] in transient
+            ]
             # Prefer episodic and slotless memories when summarizing a day
             ordered = sorted(
                 rows,
@@ -518,14 +524,14 @@ class HybridRetriever:
         if not normalize(query):
             return []
         self._row_cache = {}
+        has_window = _time_window(query, now) is not None
+        prospective = bool(_PROSPECTIVE_QUERY_RE.search(query))
         content = (
             _query_terms(query, self.soul)
             - _TIME_WORDS
             - _ACTIVITY_INQUIRY_BIGRAMS
         )
-        if (not content
-                and not _time_window(query, now)
-                and not _PROSPECTIVE_QUERY_RE.search(query)):
+        if not content and not has_window and not prospective:
             return []
         routes = {
             "fts": self._fts(query, per_route),
@@ -533,6 +539,10 @@ class HybridRetriever:
             "graph": self._graph(query, per_route),
             "time": self._time(query, per_route, now),
         }
+        if not content and (has_window or prospective):
+            # "What did we do today?" names no topic: the answer is the day's
+            # timeline, not every memory that happens to share a pronoun.
+            routes = {"fts": [], "vector": [], "graph": [], "time": routes["time"]}
         attrs = _query_attributes(query)
         if attrs:
             self._preload({

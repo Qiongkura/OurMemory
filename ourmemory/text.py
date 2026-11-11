@@ -10,7 +10,10 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 
-import numpy as np
+try:  # optional accelerator; the kernel runs on the standard library alone
+    import numpy as np
+except ImportError:  # pragma: no cover - exercised only in no-numpy environments
+    np = None
 
 VECTOR_DIM = 384
 
@@ -232,34 +235,128 @@ def _hash_token(token: str, dim: int) -> tuple[int, float]:
 
 
 def hash_vector(text: str, idf: dict[str, float] | None = None,
-                dim: int = VECTOR_DIM) -> np.ndarray:
+                dim: int = VECTOR_DIM):
+    """Signed feature hashing: a deterministic embedding with no model or API.
+
+    Returns a NumPy array when NumPy is installed, otherwise a plain list of
+    floats.  Both paths produce the same values, so a store written on one
+    machine can be read on another.
+    """
     counts = Counter(vector_tokens(text))
-    vec = np.zeros(dim, dtype=np.float32)
-    if not counts:
+    if np is not None:
+        vec = np.zeros(dim, dtype=np.float32)
+        if not counts:
+            return vec
+        for token, count in counts.items():
+            idx, sign = _hash_token(token, dim)
+            weight = 1.0 + math.log(count)
+            if idf:
+                weight *= float(idf.get(token, 1.0))
+            vec[idx] += sign * weight
+        norm = float(np.linalg.norm(vec))
+        if norm > 0:
+            vec /= norm
         return vec
+    vec_list = [0.0] * dim
+    if not counts:
+        return vec_list
     for token, count in counts.items():
         idx, sign = _hash_token(token, dim)
         weight = 1.0 + math.log(count)
         if idf:
             weight *= float(idf.get(token, 1.0))
-        vec[idx] += sign * weight
-    norm = float(np.linalg.norm(vec))
+        vec_list[idx] += sign * weight
+    norm = math.sqrt(sum(value * value for value in vec_list))
     if norm > 0:
-        vec /= norm
-    return vec
+        vec_list = [value / norm for value in vec_list]
+    return vec_list
 
 
 def cosine(a, b) -> float:
     if a is None or b is None:
         return 0.0
-    a = np.asarray(a, dtype=np.float32)
-    b = np.asarray(b, dtype=np.float32)
-    if a.size == 0 or b.size == 0 or a.size != b.size:
+    if np is not None:
+        a = np.asarray(a, dtype=np.float32)
+        b = np.asarray(b, dtype=np.float32)
+        if a.size == 0 or b.size == 0 or a.size != b.size:
+            return 0.0
+        na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+    left = [float(value) for value in a]
+    right = [float(value) for value in b]
+    if not left or not right or len(left) != len(right):
         return 0.0
-    na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    dot = sum(x * y for x, y in zip(left, right))
+    na = math.sqrt(sum(x * x for x in left))
+    nb = math.sqrt(sum(y * y for y in right))
     if na == 0 or nb == 0:
         return 0.0
-    return float(np.dot(a, b) / (na * nb))
+    return dot / (na * nb)
+
+
+def vector_width(matrix) -> int:
+    """Number of columns in a matrix-like object, NumPy or plain lists."""
+    if matrix is None:
+        return 0
+    if np is not None and hasattr(matrix, "shape"):
+        shape = getattr(matrix, "shape", ())
+        return int(shape[1]) if len(shape) == 2 else 0
+    try:
+        if len(matrix) == 0:
+            return 0
+        return len(matrix[0])
+    except TypeError:
+        return 0
+
+
+def vectors_matrix(vecs: list, width: int):
+    """Stack row vectors into a matrix, with or without NumPy."""
+    if np is not None:
+        if not vecs:
+            return np.zeros((0, width or VECTOR_DIM), dtype=np.float32)
+        return np.vstack([np.asarray(vec, dtype=np.float32) for vec in vecs])
+    return [list(vec) for vec in vecs]
+
+
+def rank_vectors(query_vec, ids: list[str], matrix, limit: int, floor: float):
+    """Return ``[(memory_id, cosine)]`` sorted by similarity, above ``floor``."""
+    if not ids or matrix is None:
+        return []
+    if np is not None:
+        query = np.asarray(query_vec, dtype=np.float32)
+        if matrix.shape[0] == 0 or matrix.shape[1] != query.size:
+            return []
+        scores = matrix @ query
+        order = scores.argsort()[::-1]
+        out: list[tuple[str, float]] = []
+        for index in order:
+            score = float(scores[int(index)])
+            if score < floor:
+                break
+            out.append((ids[int(index)], score))
+            if len(out) >= limit:
+                break
+        return out
+    query = [float(value) for value in query_vec]
+    query_norm = math.sqrt(sum(value * value for value in query)) or 1.0
+    scored: list[tuple[float, str]] = []
+    for memory_id, row in zip(ids, matrix):
+        if len(row) != len(query):
+            continue
+        dot = sum(x * y for x, y in zip(row, query))
+        row_norm = math.sqrt(sum(value * value for value in row)) or 1.0
+        scored.append((dot / (row_norm * query_norm), memory_id))
+    scored.sort(reverse=True)
+    out = []
+    for score, memory_id in scored:
+        if score < floor:
+            break
+        out.append((memory_id, score))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def jaccard(a: set[str], b: set[str]) -> float:

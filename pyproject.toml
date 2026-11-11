@@ -34,7 +34,13 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+speed = ["numpy>=1.24"]
+dev = ["pytest>=7.4", "numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/Qiongkura/OurMemory"
+Repository = "https://github.com/Qiongkura/OurMemory"
+Issues = "https://github.com/Qiongkura/OurMemory/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
