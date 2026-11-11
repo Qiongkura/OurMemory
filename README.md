@@ -7,6 +7,8 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
 [![Dependencies: none required](https://img.shields.io/badge/Dependencies-none%20required-purple.svg)](pyproject.toml)
 
+[English](README.en.md) | 简体中文
+
 > **TL;DR** — Most memory libraries store facts about a user. OurMemory stores a relationship: who you two are, what you're doing today, which promises are still open, and which plans are already over. It runs on Python + SQLite alone (no vector DB, no embedding API, numpy optional), rebuilds the prompt from disk every turn, and stops the companion from inventing life events.
 
 ---
