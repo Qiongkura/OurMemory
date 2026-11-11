@@ -1,4 +1,4 @@
-# ourmemory
+# OurMemory
 
 **Stateless, Three-State Memory Kernel for Relational AI & Digital Life**  
 **面向关系型 AI 与数字生命的「无状态唤醒 · 三态演进」记忆内核**
@@ -9,7 +9,7 @@
 
 ---
 
-## Why `ourmemory`? / 为什么需要 `ourmemory`？
+## Why OurMemory? / 为什么需要 OurMemory？
 
 Most open-source agent memory libraries (`Mem0`, `Zep`, `MemGPT/Letta`) are designed for **single-subject task assistants** ("remember the user's API preference or meeting notes"). When applied to **long-term relational AI, companions, or digital life**, they fail in five predictable ways:
 
