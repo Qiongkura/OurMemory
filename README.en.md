@@ -224,30 +224,17 @@ Tests use entirely fictional personas and contain no real conversation data. `pr
 
 ---
 
-## Tradeoffs and known limits
+## Tradeoffs and design boundaries
 
-Short version: **four of these six were engineering problems and are fixed**; the other two are deliberate boundaries, not unfinished work.
+This architecture was carved out of real companion bot incidents. Some things are out of scope by design:
 
-| Original limit | Status | What it is now |
-|---|---|---|
-| Built-in vector is feature hashing, not semantic | **Partly solved** | Still zero-dependency hashing by default; but `embedder=` is now used **at write time as well as query time** (it was query-only — a real bug), and stored width follows your model |
-| Time recall ignores time zones | **Solved** | New `clock.py`; pass `tz="Asia/Shanghai"` or a `tzinfo`. "Today" means real calendar midnight, DST included |
-| Chinese-first, English degraded | **Much better** | Time words, activity questions, prospective plans, stopwords, and the outbound guard all have English; free-form English turns are recallable |
-| Outbound guard is a term list plus rules | **Still a term list** | Added English terms and fixed two real bugs: English first person wasn't caught at all, and `intern` matched inside `internet` |
-| One SQLite writer | **Deliberate boundary** | Fine for a single-machine companion; multi-tenant/distributed is out of scope |
-| Scene rules are heuristics | **Deliberate boundary** | Covers frequent daily scenes, not a world model; with an LLM wired in, let the LLM judge |
+- **Single SQLite writer**: Designed for one companion on one machine. It is not a multi-tenant cloud service and does not do distributed syncing. If you're building a commercial SaaS with tens of thousands of concurrent users, use a dedicated vector DB and distributed infrastructure instead.
+- **Default vector is feature hashing (zero-dependency)**: It runs out of the box, needs no model download, and works completely offline. But feature hashing is still a projection — it won't understand that "headpats" and "getting patted on the head" mean the same thing. If your use case relies heavily on deep semantic generalization, pass your own `embedder=` on initialization.
+- **Outbound guard targets major life events**: The civilization membrane has one specific job: preventing catastrophic hallucinations where the agent suddenly invents an interview, a hospital visit, a surgery, or an engagement out of thin air. It is a deterministic rule guard, not a general-purpose real-time fact checker.
+- **Scene transitions use deterministic heuristics**: Common everyday routines — heading out, arriving at the park, coming home, cooking dinner — work reliably, but it is not a world model. Complex plot reasoning and open-ended nuances belong to the LLM itself.
 
-In detail:
-
-- **The built-in vector is feature hashing, not a semantic model.** The default path stays offline and dependency-free, but it won't know "pat on the head" and "got headpats" are the same event. Pass `embedder=` for real semantic recall — it now runs on writes too, not just queries. Changing dimensions requires re-embedding existing rows.
-- **One SQLite writer.** Great for one machine and one companion; not a multi-tenant SaaS, and it doesn't sync across devices. A design boundary, not a TODO.
-- **The outbound guard is a term list plus rules.** It covers common high-risk events in Chinese and English, not general fact-checking. New event types need new terms. The deliberate bias is to under-block rather than kill ordinary conversation, which is why terms use word boundaries and ambiguous words are gated (`resume the video` and `the operation runs in O(n)` don't fire).
-- **Scene rules are heuristics.** Arriving, coming home, cooking, bathing are covered well. It is not a world model.
-- **Time recall is a window plus episodic preference.** Not a calendar, but time zones are handled: `tz=` decides where "today" starts.
-- **Chinese-first.** Tokenization and slot rules are still Chinese-centric; English works normally rather than equally well. A mixed-language turn may only match one side.
-
-Good fit: single-user companion agents, long-term relationships, and a memory layer you need to audit and migrate.  
-Poor fit: multi-tenant platforms, strong semantic retrieval without an embedder, or distributed writes.
+- **Great fit**: Self-hosted or single-user companion agents, long-term relational continuity, and setups where memories must be transparent, auditable, and easily portable.
+- **Poor fit**: Multi-tenant platforms, complex semantic reasoning without an embedding model, or multi-process concurrent write systems.
 
 ---
 
