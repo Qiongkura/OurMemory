@@ -25,15 +25,20 @@ _VECTOR_STRONG = 0.72
 
 _TIME_HINT_RE = re.compile(
     r"昨天|昨晚|前天|上次|之前|那天|上周|上个月|以前|当时|那时候|"
-    r"今天|今晚|刚才|刚刚|最近|这几天"
+    r"今天|今晚|刚才|刚刚|最近|这几天|"
+    r"\b(?:today|tonight|yesterday|last night|this morning|this afternoon|"
+    r"this evening|earlier|just now|recently|last week|last month)\b",
+    re.IGNORECASE,
 )
-_DAYS_RE = re.compile(r"(\d+)\s*天前")
-_HOURS_RE = re.compile(r"(\d+)\s*(?:个)?小时前")
+_DAYS_RE = re.compile(r"(\d+)\s*(?:天前|days?\s+ago)", re.IGNORECASE)
+_HOURS_RE = re.compile(r"(\d+)\s*(?:个)?(?:小时前|hours?\s+ago)", re.IGNORECASE)
 
 _TIME_WORDS = frozenset({
     "昨天", "昨晚", "前天", "上次", "之前", "那天", "上周", "上个月",
     "以前", "当时", "那时候", "今天", "今晚", "刚才", "刚刚", "最近",
     "这几天", "天前", "小时", "时候",
+    "today", "tonight", "yesterday", "earlier", "recently", "ago",
+    "morning", "afternoon", "evening", "night", "week", "month",
 })
 
 # Activity inquiry words in questions like "我们今天干了啥" / "昨天做了什么"
@@ -48,13 +53,19 @@ _ACTIVITY_INQUIRY_RE = re.compile(
     r"我们|你们|咱们|都|到底|究竟|"
     r"干了(?:什么|啥)|做了(?:什么|啥)|干嘛了|做什么了|干什么了|"
     r"发生了(?:什么|啥)|发生(?:什么|啥)|做过(?:什么|啥)|"
-    r"去了(?:哪里|哪儿|哪)|去哪(?:里|儿)?了|玩了(?:什么|啥)|聊了(?:什么|啥)"
+    r"去了(?:哪里|哪儿|哪)|去哪(?:里|儿)?了|玩了(?:什么|啥)|聊了(?:什么|啥)|"
+    r"\bwhat\s+(?:did|have)\s+(?:we|you|i)\s+(?:do|done|been\s+up\s+to)\b|"
+    r"\bwhat\s+happened\b",
+    re.IGNORECASE,
 )
 
 _PROSPECTIVE_QUERY_RE = re.compile(
     r"(?:明天|后天|待会|待会儿|等下|等会儿|接下来|下周|周末|以后)"
     r".{0,8}(?:干嘛|干啥|做什么|干什么|去哪|安排|计划|打算)|"
-    r"有什么(?:计划|安排|打算)"
+    r"有什么(?:计划|安排|打算)|"
+    r"\bwhat\s+(?:are|will)\s+(?:you|we)\s+(?:doing|do)\b|"
+    r"\b(?:any\s+)?plans?\s+for\b",
+    re.IGNORECASE,
 )
 
 _SLOT_SYNONYMS = {
@@ -99,6 +110,13 @@ _GENERIC = frozenset({
     "还是", "就是", "真的", "自己", "已经", "没有", "不是", "然后", "因为",
     "主人", "对方", "用户", "你", "我", "他", "她",
     "在哪", "哪里", "哪儿", "那里", "这里", "刚才", "刚刚", "到底",
+    # English function words: without these, "what did we do today" treats
+    # every word as a content term and matches nothing meaningful.
+    "the", "and", "for", "you", "your", "are", "was", "were", "this", "that",
+    "with", "from", "have", "has", "had", "not", "but", "all", "can", "just",
+    "now", "will", "would", "what", "did", "does", "doing", "done", "we", "us",
+    "our", "me", "my", "i", "do", "today", "tonight", "yesterday", "about",
+    "there", "here", "when", "where", "who", "how", "why", "any", "some",
 })
 
 _ATTRIBUTE_TRIGGERS = {
@@ -253,32 +271,43 @@ def _time_content_terms(query: str, soul: SoulSpec = DEFAULT_SOUL) -> set[str]:
     return _query_terms(stripped, soul) - _TIME_WORDS - _ACTIVITY_INQUIRY_BIGRAMS
 
 
-def _time_window(query: str, now: float) -> tuple[float, float] | None:
-    match = _DAYS_RE.search(query)
+def _time_window(query: str, now: float,
+                 tz=None) -> tuple[float, float] | None:
+    """Turn "昨天/3天前/上周" into a concrete timestamp window.
+
+    Day-scale windows use real calendar midnights in ``tz`` (system local time
+    when None), so a server running in UTC still answers "today" for a user in
+    Asia/Shanghai.
+    """
+    from .clock import day_bounds
+
+    text = str(query or "")
+    match = _DAYS_RE.search(text)
     if match:
         days = int(match.group(1))
-        end = now - (days - 1) * 86400
-        return end - 86400, end + 86400
-    match = _HOURS_RE.search(query)
+        return day_bounds(now, tz, offset_days=-days)
+    match = _HOURS_RE.search(text)
     if match:
         hours = int(match.group(1))
         end = now - hours * 3600
         return end - 3600, end + 3600
-    if "昨天" in query or "昨晚" in query:
-        return now - 2 * 86400, now - 86400
-    if "前天" in query:
-        return now - 3 * 86400, now - 2 * 86400
-    if "上周" in query:
+    lowered = text.lower()
+    if "昨天" in text or "昨晚" in text or "yesterday" in lowered:
+        return day_bounds(now, tz, offset_days=-1)
+    if "前天" in text:
+        return day_bounds(now, tz, offset_days=-2)
+    if "上周" in text or "last week" in lowered:
         return now - 14 * 86400, now - 7 * 86400
-    if "上个月" in query:
+    if "上个月" in text or "last month" in lowered:
         return now - 60 * 86400, now - 30 * 86400
-    if "今天" in query or "今晚" in query:
-        return now - 86400, now + 3600
-    if "刚才" in query or "刚刚" in query:
+    if "今天" in text or "今晚" in text or "today" in lowered or "tonight" in lowered:
+        start, _end = day_bounds(now, tz, offset_days=0)
+        return start, now + 3600
+    if "刚才" in text or "刚刚" in text or "just now" in lowered or "earlier" in lowered:
         return now - 3600, now + 60
-    if "最近" in query or "这几天" in query:
+    if "最近" in text or "这几天" in text or "recently" in lowered:
         return now - 7 * 86400, now + 60
-    if _TIME_HINT_RE.search(query):
+    if _TIME_HINT_RE.search(text):
         return now - 30 * 86400, now + 60
     return None
 
@@ -287,13 +316,14 @@ class HybridRetriever:
     """Four-way recall fused with weighted reciprocal rank fusion (RRF)."""
 
     def __init__(self, store, conv_key: str, *, embedder=None, logger=None,
-                 mood=None, soul: SoulSpec = DEFAULT_SOUL):
+                 mood=None, soul: SoulSpec = DEFAULT_SOUL, tz=None):
         self.store = store
         self.conv_key = conv_key
         self.embedder = embedder
         self.logger = logger or (lambda message: None)
         self.mood = mood
         self.soul = soul
+        self.tz = tz
 
     def _fts(self, query: str, limit: int) -> list[tuple[str, float]]:
         terms = _query_terms(query, self.soul) - _ACTIVITY_INQUIRY_BIGRAMS
@@ -390,7 +420,7 @@ class HybridRetriever:
             except Exception:
                 return []
 
-        window = _time_window(query, now)
+        window = _time_window(query, now, self.tz)
         if window is None:
             return []
         explicit_time = (
@@ -524,7 +554,7 @@ class HybridRetriever:
         if not normalize(query):
             return []
         self._row_cache = {}
-        has_window = _time_window(query, now) is not None
+        has_window = _time_window(query, now, self.tz) is not None
         prospective = bool(_PROSPECTIVE_QUERY_RE.search(query))
         content = (
             _query_terms(query, self.soul)
@@ -631,9 +661,10 @@ def _recency_weight(ts: float, now: float) -> float:
     return 0.55 + 0.45 * math.exp(-age_days / 30.0)
 
 
-def render_hits(hits: list[Hit], *, limit: int = 6) -> str:
+def render_hits(hits: list[Hit], *, limit: int = 6, tz=None) -> str:
     if not hits:
         return ""
+    from .clock import stamp as _stamp
     lines = []
     seen: set[str] = set()
     for hit in hits:
@@ -641,7 +672,7 @@ def render_hits(hits: list[Hit], *, limit: int = 6) -> str:
         if key in seen:
             continue
         seen.add(key)
-        stamp = time.strftime("%m-%d %H:%M", time.localtime(hit.ts or time.time()))
+        stamp = _stamp(hit.ts or time.time(), tz)
         marker = "" if hit.confidence == "high" else "（记不太清）"
         orbit_tag = " [待定]" if hit.orbit == "pending" else ""
         lines.append(f"- [{stamp}]{orbit_tag}{marker} {hit.text[:120]}")

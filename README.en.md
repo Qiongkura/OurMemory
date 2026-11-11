@@ -66,7 +66,7 @@ Time questions get special handling. "What did we do today?" and "what happened 
 ### 5. A two-way membrane
 
 - **Inbound**: rhetorical questions, hypotheticals, jokes, commands, and placeholder garbage (`none\nfollow-up: none`) never enter long-term memory.
-- **Outbound**: if a reply contains a first-person major life event — interview, internship, hospitalization, surgery, moving, meeting the parents, engagement — and there is no basis for it in the user's current message or in memory, one low-temperature rewrite is triggered. If the rewrite is still ungrounded, the offending clauses are removed.
+- **Outbound**: if a reply contains a first-person major life event — interview, internship, hospitalization, surgery, moving, meeting the parents, engagement — and there is no basis for it in the user's current message or in memory, one low-temperature rewrite is triggered. If the rewrite is still ungrounded, the offending clauses are removed. Works in Chinese and English; third-party mentions, questions back to the user, and hypotheticals don't count as self claims.
 - Prior hallucinations in the history are filtered too, so she can't treat her own earlier invention as established fact.
 
 This layer is deterministic. It does not make an extra model call.
@@ -169,7 +169,18 @@ checked = kernel.guard_reply(conv, draft, user_text="你在忙什么呢")
 # needs_regeneration: True
 # ungrounded_events: ['运营岗', '简历']
 # cleaned_reply: 我也没底
+
+checked = kernel.guard_reply(
+    conv,
+    "I have a job interview tomorrow, I am still fixing my resume",
+    user_text="what are you up to",
+)
+# needs_regeneration: True
+# ungrounded_events: ['job interview', 'resume']
+# cleaned_reply: ''
 ```
+
+Third-party mentions ("my roommate has an interview"), questions back to the user ("did you have your interview?"), and meta talk ("I dreamt I had an interview") are not treated as self claims.
 
 ---
 
@@ -177,6 +188,7 @@ checked = kernel.guard_reply(conv, draft, user_text="你在忙什么呢")
 
 | Method | What it does |
 |---|---|
+| `MemoryKernel(db_path, soul=..., embedder=..., tz=...)` | Construct. `embedder` is used on writes and queries; `tz` sets where "today" starts |
 | `awaken(conv, query, memory_question=False)` | Build the turn's memory workspace (card + current state + scene + recall + certainty) |
 | `observe(conv, user_text, bot_text)` | Record a turn, advance the scene and the three-state orbit |
 | `guard_reply(conv, reply, user_text, workspace_text)` | Outbound check: ungrounded events and identity-slot contradictions |
@@ -204,7 +216,7 @@ Shows the three-state distribution, resident card, current state, today's scene,
 ## Tests and privacy gate
 
 ```bash
-pytest -q                        # 8 passed
+pytest -q                        # 13 passed
 python scripts/privacy_audit.py  # PASSED: zero PII / secrets
 ```
 
@@ -214,12 +226,25 @@ Tests use entirely fictional personas and contain no real conversation data. `pr
 
 ## Tradeoffs and known limits
 
-- **The built-in vector is feature hashing, not a semantic model.** It runs offline with zero dependencies, but it won't know "pat on the head" and "got headpats" are the same event. Pass `embedder=` for real semantic recall; changing dimensions requires re-embedding.
-- **One SQLite writer.** Great for one machine and one companion; not a multi-tenant SaaS, and it doesn't sync across devices.
-- **The outbound guard is a term list plus rules.** It covers common high-risk events, not general fact-checking; new event types need new terms.
+Short version: **four of these six were engineering problems and are fixed**; the other two are deliberate boundaries, not unfinished work.
+
+| Original limit | Status | What it is now |
+|---|---|---|
+| Built-in vector is feature hashing, not semantic | **Partly solved** | Still zero-dependency hashing by default; but `embedder=` is now used **at write time as well as query time** (it was query-only — a real bug), and stored width follows your model |
+| Time recall ignores time zones | **Solved** | New `clock.py`; pass `tz="Asia/Shanghai"` or a `tzinfo`. "Today" means real calendar midnight, DST included |
+| Chinese-first, English degraded | **Much better** | Time words, activity questions, prospective plans, stopwords, and the outbound guard all have English; free-form English turns are recallable |
+| Outbound guard is a term list plus rules | **Still a term list** | Added English terms and fixed two real bugs: English first person wasn't caught at all, and `intern` matched inside `internet` |
+| One SQLite writer | **Deliberate boundary** | Fine for a single-machine companion; multi-tenant/distributed is out of scope |
+| Scene rules are heuristics | **Deliberate boundary** | Covers frequent daily scenes, not a world model; with an LLM wired in, let the LLM judge |
+
+In detail:
+
+- **The built-in vector is feature hashing, not a semantic model.** The default path stays offline and dependency-free, but it won't know "pat on the head" and "got headpats" are the same event. Pass `embedder=` for real semantic recall — it now runs on writes too, not just queries. Changing dimensions requires re-embedding existing rows.
+- **One SQLite writer.** Great for one machine and one companion; not a multi-tenant SaaS, and it doesn't sync across devices. A design boundary, not a TODO.
+- **The outbound guard is a term list plus rules.** It covers common high-risk events in Chinese and English, not general fact-checking. New event types need new terms. The deliberate bias is to under-block rather than kill ordinary conversation, which is why terms use word boundaries and ambiguous words are gated (`resume the video` and `the operation runs in O(n)` don't fire).
 - **Scene rules are heuristics.** Arriving, coming home, cooking, bathing are covered well. It is not a world model.
-- **Time recall is a window plus episodic preference**, not a calendar, and it doesn't handle time zones.
-- **Chinese-first.** Tokenization, slots, and rhetorical-question rules are written for Chinese; English runs, but with reduced quality.
+- **Time recall is a window plus episodic preference.** Not a calendar, but time zones are handled: `tz=` decides where "today" starts.
+- **Chinese-first.** Tokenization and slot rules are still Chinese-centric; English works normally rather than equally well. A mixed-language turn may only match one side.
 
 Good fit: single-user companion agents, long-term relationships, and a memory layer you need to audit and migrate.  
 Poor fit: multi-tenant platforms, strong semantic retrieval without an embedder, or distributed writes.

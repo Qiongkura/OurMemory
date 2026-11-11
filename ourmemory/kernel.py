@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from .canvas import build_workspace, core_card, recall_block, scene_canvas, state_block
+from .clock import resolve_tz
 from .db import Database
 from .encoder import apply_fast_path, encode_turn, state_items
 from .graph import NeuroGraph
@@ -32,7 +33,7 @@ from .membrane import (
     filter_ungrounded_history,
     guard_outbound_reply,
 )
-from .orbit import MemoryItem, ORBIT_CONFIRMED, SUBJECT_BOTH
+from .orbit import MemoryItem, ORBIT_CONFIRMED, SUBJECT_BOTH, SUBJECT_USER
 from .retrieve import HybridRetriever
 from .scene import apply_state_transitions, repair_store, write_items
 from .soul import DEFAULT_SOUL, AnchorReport, SoulSpec, verify_anchors
@@ -41,11 +42,31 @@ from .text import extract_entities, normalize
 import re
 
 _OFFLINE_SHARED_PLAN_RE = re.compile(
-    r"(?:我们|咱们|一起)[^，。！？!?]{0,6}?去([\u4e00-\u9fa5]{2,10})(?:吧|呀|好不好|好吗)?"
+    r"(?:我们|咱们|一起)[^，。！？!?]{0,6}?去([\u4e00-\u9fa5]{2,10}?)"
+    r"(?:吧|呀|好不好|好吗|啊)?[。！？!?，,]?$"
 )
 _OFFLINE_SHARED_ACT_RE = re.compile(
     r"(?:我们|咱们|一起)(?:来|去|在)?(做晚饭|做饭|吃饭|洗碗|散步|看电影|打游戏|休息)"
 )
+
+_QUESTION_TAIL_RE = re.compile(r"[?？]\s*$|(?:吗|呢|么|嘛)\s*[?？]?\s*$")
+_GREETING_ONLY_RE = re.compile(
+    r"^(?:hi|hello|hey|yo|ok|okay|thanks|thank you|嗯+|哦+|啊+|哈+|在吗|早安|晚安|"
+    r"你好|嗨|早|晚安啦)[\s!！。,.，~～]*$",
+    re.IGNORECASE,
+)
+
+
+def _worth_recalling(text: str) -> bool:
+    """True when a turn is worth keeping verbatim as a recallable utterance."""
+    body = str(text or "").strip()
+    if len(body) < 6:
+        return False
+    if _QUESTION_TAIL_RE.search(body):
+        return False
+    if _GREETING_ONLY_RE.match(body):
+        return False
+    return True
 
 
 class MemoryKernel:
@@ -58,13 +79,15 @@ class MemoryKernel:
         soul: SoulSpec = DEFAULT_SOUL,
         llm_call: Callable[[list[dict]], str] | None = None,
         embedder=None,
+        tz=None,
     ):
         self.path = str(db_path)
         self.soul = soul
         self.llm_call = llm_call
         self.embedder = embedder
+        self.tz = resolve_tz(tz)
         self.db = Database(self.path)
-        self.store = MemoryStore(self.db)
+        self.store = MemoryStore(self.db, embedder=embedder)
         self.graph = NeuroGraph(self.db)
         if self.soul.invariants:
             self.seed_invariants("global")
@@ -107,6 +130,7 @@ class MemoryKernel:
         include_card: bool = True,
         include_canvas: bool = True,
         memory_question: bool = False,
+        tz=None,
     ) -> str:
         """Build the stateless memory workspace prompt for a single turn."""
         return build_workspace(
@@ -119,6 +143,7 @@ class MemoryKernel:
             include_card=include_card,
             include_canvas=include_canvas,
             memory_question=memory_question,
+            tz=tz if tz is not None else self.tz,
         )
 
     def observe(
@@ -246,6 +271,29 @@ class MemoryKernel:
                 now=now,
             )
 
+        if not ids and _worth_recalling(u_clean):
+            # Nothing structured matched (common outside Chinese, or for
+            # free-form narration). Keep the turn itself as an `utterance` row
+            # so it stays recallable, while staying out of the resident
+            # timeline, which only renders `episodic` and `prospective`.
+            mid, _created = self.store.add(
+                "utterance",
+                u_clean,
+                summary=u_clean[:80],
+                ts=now,
+                source="observed",
+                conv_key=conv_key,
+                importance=0.45,
+                confidence=0.7,
+                orbit=ORBIT_CONFIRMED,
+            )
+            self.store.db.conn.execute(
+                "UPDATE memories SET subject=?, layer='utterance', status='active', "
+                "orbit='confirmed', valid_from=? WHERE id=?",
+                (SUBJECT_USER, now, mid),
+            )
+            ids.append(mid)
+
         if use_slow_path and self.llm_call is not None:
             history = []
             if u_clean:
@@ -278,10 +326,12 @@ class MemoryKernel:
 
         return ids
 
-    def search(self, conv_key: str, query: str, *, limit: int = 6, now: float | None = None):
+    def search(self, conv_key: str, query: str, *, limit: int = 6,
+               now: float | None = None, tz=None):
         """Run four-route hybrid retrieval directly and return `RetrievalHit` objects."""
         return HybridRetriever(
-            self.store, conv_key, embedder=self.embedder, soul=self.soul
+            self.store, conv_key, embedder=self.embedder, soul=self.soul,
+            tz=tz if tz is not None else self.tz,
         ).search(query, limit=limit, now=now)
 
     def guard_reply(
@@ -374,10 +424,12 @@ class MemoryKernel:
         return state_block(self.store, conv_key, now=now)
 
     def scene_canvas(self, conv_key: str, *, now: float | None = None) -> str:
-        return scene_canvas(self.store, conv_key, now=now)
+        return scene_canvas(self.store, conv_key, now=now, tz=self.tz)
 
     def recall_block(self, conv_key: str, query: str, *, now: float | None = None) -> str:
-        return recall_block(self.store, conv_key, query, now=now, soul=self.soul)
+        return recall_block(
+            self.store, conv_key, query, now=now, soul=self.soul, tz=self.tz
+        )
 
 
 def default_db_path() -> str:

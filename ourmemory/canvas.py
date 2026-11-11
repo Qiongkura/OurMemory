@@ -17,6 +17,7 @@ import re
 import time
 
 from .retrieve import HybridRetriever, render_hits
+from .clock import stamp as _stamp
 from .soul import DEFAULT_SOUL, SoulSpec
 from .store import MemoryStore
 from .text import normalize, short, token_set
@@ -176,7 +177,7 @@ def core_card(
     if bot_lines:
         parts.append("【你自己】\n" + "\n".join(render(bot_lines)))
     body = "\n".join(parts)[:budget]
-    if body:
+    if body and user_lines:
         body += (
             "\n（问“我在哪/我在哪个城市”时，用上面【你记得的他】里的"
             "所在城市回答；问“你在哪”才用她自己的地点。）"
@@ -264,6 +265,7 @@ def scene_canvas(
     now: float | None = None,
     window_hours: float = 18.0,
     budget: int = CANVAS_BUDGET,
+    tz=None,
 ) -> str:
     """Resident Scene Canvas (今日现场画).
 
@@ -295,7 +297,7 @@ def scene_canvas(
             continue
         seen.add(first_line)
         ts = float(row["ts"] or now)
-        stamp = time.strftime("%H:%M", time.localtime(ts))
+        stamp = _stamp(ts, tz, "%H:%M")
         layer = str(row["layer"] or "")
         if layer == "prospective":
             promises.append(f"- [约定] {short(first_line, 48)}")
@@ -347,6 +349,7 @@ def recall_block(
     mood=None,
     soul: SoulSpec = DEFAULT_SOUL,
     stats: dict | None = None,
+    tz=None,
 ) -> str:
     now = time.time() if now is None else float(now)
     if stats is not None:
@@ -372,13 +375,13 @@ def recall_block(
             stats["best"] = 0.9
         lines = []
         for row in rows:
-            stamp = time.strftime("%m-%d %H:%M", time.localtime(float(row["ts"] or now)))
+            stamp = _stamp(float(row["ts"] or now), tz)
             lines.append(f"- [{stamp}] {str(row['text'] or '')[:120]}")
         return "【相关记忆】\n" + "\n".join(lines)
 
     try:
         hits = HybridRetriever(
-            store, conv_key, embedder=embedder, mood=mood, soul=soul
+            store, conv_key, embedder=embedder, mood=mood, soul=soul, tz=tz
         ).search(query, limit=limit, now=now)
     except Exception:
         hits = []
@@ -387,7 +390,7 @@ def recall_block(
             stats["hits"] = len(hits)
             stats["best"] = max(hit.certainty for hit in hits)
         store.touch([hit.memory_id for hit in hits[:limit]], now=now)
-        return render_hits(hits, limit=limit)
+        return render_hits(hits, limit=limit, tz=tz)
 
     # Degraded substring fallback
     stop = soul.all_generic_pronouns() | {"今天", "明天", "昨天", "现在", "什么", "怎么"}
@@ -414,7 +417,7 @@ def recall_block(
         stats["best"] = 0.0
     lines = []
     for row in picked:
-        stamp = time.strftime("%m-%d %H:%M", time.localtime(float(row["ts"] or now)))
+        stamp = _stamp(float(row["ts"] or now), tz)
         lines.append(f"- [{stamp}] {str(row['text'])[:120]}")
     return "【相关记忆】\n" + "\n".join(lines)
 
@@ -480,6 +483,7 @@ def build_workspace(
     include_card: bool = True,
     include_canvas: bool = True,
     memory_question: bool = False,
+    tz=None,
 ) -> str:
     """Assemble the complete stateless memory prompt section for one turn."""
     now = time.time() if now is None else float(now)
@@ -488,10 +492,10 @@ def build_workspace(
     blocks = [
         core_card(store, conv_key, now=now) if include_card else "",
         state_block(store, conv_key, now=now),
-        scene_canvas(store, conv_key, now=now) if include_canvas else "",
+        scene_canvas(store, conv_key, now=now, tz=tz) if include_canvas else "",
         recall_block(
             store, conv_key, query, now=now, embedder=embedder,
-            mood=mood, soul=soul, stats=stats,
+            mood=mood, soul=soul, stats=stats, tz=tz,
         ),
         conflicted_block(store, conv_key),
         certainty_block(stats, memory_question=memory_question),

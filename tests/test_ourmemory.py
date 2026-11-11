@@ -352,3 +352,130 @@ def test_audit_hash_chain_and_tamper_detection():
     )
     ok_after, _ = kernel.verify_audit(conv)
     assert not ok_after
+
+
+def test_english_outbound_membrane_blocks_ungrounded_life_events():
+    soul = _demo_soul()
+    kernel = MemoryKernel(":memory:", soul=soul)
+    conv = "test:membrane-en"
+    kernel.seed_invariants(conv)
+
+    # 1. First-person English life event with no grounding is caught and stripped
+    guard = kernel.guard_reply(
+        conv,
+        "I have a job interview tomorrow, I am still fixing my resume",
+        user_text="what are you up to",
+        workspace_text="",
+    )
+    assert guard.needs_regeneration
+    assert "job interview" in guard.ungrounded_events
+    assert "resume" in guard.ungrounded_events
+    assert guard.cleaned_reply == ""
+
+    # 2. Partially grounded reply keeps the grounded clause only
+    partial = kernel.guard_reply(
+        conv,
+        "I had surgery this morning, but I still want milk tea",
+        user_text="do you want milk tea",
+        workspace_text="",
+    )
+    assert "surgery" in partial.ungrounded_events
+    assert "milk tea" in partial.cleaned_reply
+    assert "surgery" not in partial.cleaned_reply
+
+    # 3. Third-party English mention passes
+    third_party = kernel.guard_reply(
+        conv,
+        "my roommate has a job interview tomorrow, she is nervous",
+        user_text="how is your dorm",
+        workspace_text="",
+    )
+    assert not third_party.ungrounded_events
+
+    # 4. Asking the user about their own interview is not a self claim
+    asking = kernel.guard_reply(
+        conv,
+        "did you have your interview today?",
+        user_text="hey",
+        workspace_text="",
+    )
+    assert not asking.ungrounded_events
+
+    # 5. Meta talk (dreams, negation) is not a claim
+    for meta in (
+        "I dreamt I had a job interview",
+        "I never had an interview, I am just chilling",
+    ):
+        result = kernel.guard_reply(conv, meta, user_text="hey", workspace_text="")
+        assert not result.ungrounded_events, meta
+
+    # 6. Ordinary non-event uses of ambiguous words are ignored
+    for benign in ("I resume the video at 3pm", "the operation runs in O(n)"):
+        result = kernel.guard_reply(conv, benign, user_text="hey", workspace_text="")
+        assert not result.ungrounded_events, benign
+
+
+def test_english_history_sanitization_strips_prior_hallucinations():
+    kernel = MemoryKernel(":memory:", soul=_demo_soul())
+    history = [
+        {"role": "user", "content": "what's up"},
+        {"role": "assistant", "content": "I got engaged last week, planning the wedding"},
+        {"role": "user", "content": "really?"},
+        {"role": "assistant", "content": "just kidding, I am home watching a movie"},
+    ]
+    cleaned = kernel.sanitize_history(history)
+    assistant_texts = [m["content"] for m in cleaned if m["role"] == "assistant"]
+    assert not any("engaged" in t for t in assistant_texts)
+    assert any("movie" in t for t in assistant_texts)
+
+
+def test_custom_embedder_is_used_when_writing_not_just_querying():
+    calls: list[int] = []
+
+    def embedder(texts):
+        calls.append(len(texts))
+        return [[0.02] * 512 for _ in texts]
+
+    soul = _demo_soul()
+    kernel = MemoryKernel(":memory:", soul=soul, embedder=embedder)
+    conv = "test:embedder"
+    kernel.observe(conv, "我们下午去公园散步吧", "好呀")
+
+    # The injected model must be used at write time; otherwise stored rows stay
+    # in the 384-dim hashing space and the vector route silently skips them.
+    assert calls, "embedder was never called while storing"
+    _ids, matrix = kernel.store.vectors()
+    assert matrix.shape[1] == 512
+
+
+def test_english_activity_and_time_queries_are_understood():
+    soul = _demo_soul()
+    kernel = MemoryKernel(":memory:", soul=soul, tz="Asia/Shanghai")
+    conv = "test:english"
+    kernel.observe(conv, "we went to the park and had milk tea", "sounds fun")
+
+    hits = kernel.search(conv, "did we go to the park?")
+    assert hits and any("park" in hit.text for hit in hits)
+
+    workspace = kernel.awaken(conv, "what did we do today?", memory_question=True)
+    assert "park" in workspace
+    # Small talk must not drag memories in.
+    assert kernel.awaken(conv, "what is the weather") == ""
+
+
+def test_day_boundary_follows_the_configured_timezone():
+    from ourmemory.clock import day_bounds, stamp
+
+    # 2026-11-12 00:00 UTC is 08:00 in Shanghai, so Shanghai's "today" starts
+    # 8 hours earlier in epoch terms than UTC's.
+    instant = 1762905600.0
+    utc_start, _ = day_bounds(instant, "UTC")
+    sh_start, _ = day_bounds(instant, "Asia/Shanghai")
+    assert sh_start < utc_start
+    assert stamp(utc_start, "UTC").endswith("00:00")
+    assert stamp(sh_start, "Asia/Shanghai").endswith("00:00")
+
+    kernel = MemoryKernel(":memory:", soul=_demo_soul(), tz="Asia/Shanghai")
+    conv = "test:tz"
+    kernel.observe(conv, "我们去公园散步吧", "好呀")
+    assert "【今日现场画】" in kernel.awaken(conv, "我们今天干了啥", now=instant + 3600)

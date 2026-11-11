@@ -49,9 +49,27 @@ def _unpack_vector(blob: bytes):
 
 
 class MemoryStore:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, embedder=None):
         self.db = db
+        self.embedder = embedder
         self._vec_cache = None
+
+    def _embedding_for(self, text: str):
+        """Embedding for a new row: the injected model, else built-in hashing.
+
+        When an embedder is configured but fails, the row is stored without a
+        vector instead of silently falling back to a different vector space —
+        mixed dimensions would make the vector route skip rows unpredictably.
+        """
+        if self.embedder is None:
+            return hash_vector(text)
+        try:
+            vectors = self.embedder([text])
+            if vectors and len(vectors[0]) > 0:
+                return vectors[0]
+        except Exception:  # noqa: BLE001
+            return None
+        return None
 
     def add(
         self,
@@ -90,8 +108,8 @@ class MemoryStore:
         memory_id = f"m_{int(ts * 1000)}_{uuid.uuid4().hex}"
         tokens = fts_text(text + "\n" + summary)
         if embedding is None:
-            embedding = hash_vector(text + " " + summary)
-        blob = _pack_vector(embedding)
+            embedding = self._embedding_for(text + " " + summary)
+        blob = _pack_vector(embedding) if embedding is not None else None
         meta_json = json.dumps(meta or {}, ensure_ascii=False)
         status = "voided" if orbit == "voided" else "active"
         with self.db.tx():

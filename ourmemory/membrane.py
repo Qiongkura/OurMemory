@@ -64,31 +64,143 @@ SENSITIVE_EVENT_TERMS: tuple[str, ...] = (
     "结婚",
     "领证",
     "见家长",
+    # English equivalents, so the guard is not silently Chinese-only.
+    "interview",
+    "job interview",
+    "internship",
+    "intern",
+    "résumé",
+    "resume",
+    "job offer",
+    "offer letter",
+    "hired",
+    "fired",
+    "laid off",
+    "layoff",
+    "promotion",
+    "hospital",
+    "hospitalized",
+    "surgery",
+    "operation",
+    "emergency room",
+    "pregnant",
+    "pregnancy",
+    "miscarriage",
+    "car accident",
+    "passed away",
+    "funeral",
+    "moving out",
+    "moving house",
+    "relocating",
+    "business trip",
+    "visa",
+    "blind date",
+    "broke up",
+    "breakup",
+    "got back together",
+    "engaged",
+    "engagement",
+    "getting married",
+    "married",
+    "met the parents",
+    "offered a job",
+    "got the job",
+    "quit my job",
+    "lost my job",
 )
+
+
+def _term_pattern(term: str) -> str:
+    """Word-boundary ASCII terms, plain terms for CJK.
+
+    Without the boundaries ``intern`` matches inside ``internet`` and
+    ``operation`` inside ``operations`` — the guard would then fire on
+    ordinary technical talk.
+    """
+    escaped = re.escape(term)
+    if term.isascii():
+        return rf"(?<![A-Za-z]){escaped}(?![A-Za-z])"
+    return escaped
+
 
 _SENSITIVE_RE = re.compile(
     "|".join(
-        re.escape(term)
+        _term_pattern(term)
         for term in sorted(SENSITIVE_EVENT_TERMS, key=len, reverse=True)
     ),
     re.IGNORECASE,
 )
 
-_CLAUSE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")
+# English words that are also ordinary non-event vocabulary.  They only count
+# as a life-event claim when the surrounding words make the event reading the
+# plausible one ("fixing my resume", not "resume the video").
+_AMBIGUOUS_EN = {
+    "resume": re.compile(
+        r"(?:\bmy\b|\bthe\b|\ba\b|\bupdate\b|\bfix\w*\b|\bsend\b|\bsent\b|"
+        r"\bsubmit\w*\b|\bpolish\w*\b|\bprint\w*\b|\battach\w*\b)"
+        r"[^.!?\n]{0,20}?\bresume\b"
+        r"|\bresume\b[^.!?\n]{0,12}?\b(?:is|was|got|needs|ready)\b",
+        re.IGNORECASE,
+    ),
+    "operation": re.compile(
+        r"\b(?:had|have|having|needs?|needed|underwent|undergo|surgery|"
+        r"recover(?:ing|ed)? from)\b[^.!?\n]{0,20}?\boperation\b",
+        re.IGNORECASE,
+    ),
+    "promotion": re.compile(
+        r"\b(?:got|get|getting|earned|offered|denied|up for)\b"
+        r"[^.!?\n]{0,12}?\bpromotion\b",
+        re.IGNORECASE,
+    ),
+    "engaged": re.compile(
+        r"\b(?:got|get|getting|just|newly|recently)\s+engaged\b"
+        r"|\bengaged\s+to\b"
+        r"|\bi(?:'m| am)\s+(?:now\s+)?engaged\b",
+        re.IGNORECASE,
+    ),
+    "married": re.compile(
+        r"\b(?:got|get|getting|just|already|newly|recently)\s+married\b"
+        r"|\bmarried\s+(?:to|next|in)\b"
+        r"|\bi(?:'m| am)\s+(?:already\s+)?married\b",
+        re.IGNORECASE,
+    ),
+}
+
+_CLAUSE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+|\.\s+")
 _SUBCLAUSE_SPLIT_RE = re.compile(r"[，,]+")
 
 _THIRD_PARTY_PREFIX_RE = re.compile(
     r"(?:我(?:有个|一个|那个)?(?:室友|舍友|同学|朋友|闺蜜|学姐|学长|表姐|表哥|堂姐|堂哥|姐姐|哥哥|弟弟|妹妹|爸|妈|父母|老师|同事|亲戚)|"
-    r"别人|他们|她们|她|他|大家|网上|电视剧|小说|电影|新闻|刷到|看到有人|听说)"
+    r"别人|他们|她们|她|他|大家|网上|电视剧|小说|电影|新闻|刷到|看到有人|听说|"
+    # English third parties.  ``my roommate`` must be excluded before the
+    # first-person check, or every "my X" reads as a self claim.
+    r"\bmy\s+(?:roommate|roomie|flatmate|housemate|friend|best\s+friend|classmate|"
+    r"coworker|co-?worker|colleague|boss|manager|teacher|professor|advisor|"
+    r"sister|brother|mom|mum|mother|dad|father|parents|cousin|aunt|uncle|"
+    r"girlfriend|boyfriend|partner|husband|wife|neighbou?r|teammate|labmate|"
+    r"senior|junior|intern)\b|"
+    r"\b(?:he|she|they|someone|somebody|people|everyone|others)\b|"
+    r"\b(?:a|one\s+of\s+my)\s+(?:friend|classmate|coworker|colleague)\b|"
+    r"\bi\s+(?:heard|saw|read)\b|"
+    r"\b(?:online|on\s+the\s+news|in\s+the\s+news|in\s+a\s+movie|in\s+the\s+novel)\b)"
 )
 
 _NEGATED_OR_META_RE = re.compile(
-    r"(?:没有|没去|不去|不用|又没|才没|哪有|怎么可能|不可能|乱说|编造|瞎编|假装|梦到|做梦)"
+    r"(?:没有|没去|不去|不用|又没|才没|哪有|怎么可能|不可能|乱说|编造|瞎编|假装|梦到|做梦|"
+    r"\b(?:didn'?t|did\s+not|never|not\s+really|no\s+way|i\s+wish|if\s+only|"
+    r"dreamt|dreamed|in\s+(?:my|a)\s+dream|hypothetically|"
+    r"imagine|suppose|pretend|role-?play|joking|kidding|make[- ]believe|as\s+if|"
+    r"don'?t\s+(?:have|got|get)|do\s+not\s+have)\b)"
 )
 
 _USER_DIRECTED_RE = re.compile(
     r"你(?:怎么|干嘛|为什么|要去|去不去|是不是|有没有|在不在|准备|打算)?[^，。！？\n]{0,8}"
-    r"(?:面试|笔试|实习|找工作|投简历|改简历|简历|住院|手术|出差|搬家|相亲|分手|订婚|结婚)"
+    r"(?:面试|笔试|实习|找工作|投简历|改简历|简历|住院|手术|出差|搬家|相亲|分手|订婚|结婚)|"
+    r"\byou(?:'re|\s+are|\s+were)?\b[^.!?\n]{0,20}?"
+    r"\b(?:interview|offer|internship|hospital|surgery|operation|visa|"
+    r"promotion|wedding|exam)\b|"
+    r"\byour\b[^.!?\n]{0,12}?"
+    r"\b(?:interview|offer|internship|surgery|operation|visa|promotion|wedding)\b"
 )
 
 _SELF_EVENT_VERB_RE = re.compile(
@@ -98,6 +210,33 @@ _SELF_EVENT_VERB_RE = re.compile(
 
 _ASSERTIVE_CUE_RE = re.compile(
     r"(?:我|刚|今天|明天|昨天|后天|下周|上午|下午|晚上|这几天|最近|正在|准备|打算|要去|去了|在弄|在忙|赶着|心里没底|好紧张|好累|压力好大)"
+)
+
+# English first person.  ``your`` is deliberately absent: a reply that asks
+# "how was your interview?" is about the user, not a self claim.
+_EN_SELF_RE = re.compile(
+    r"\b(?:i|i'm|i've|i'd|i'll|my|me|myself|we|we're|we've|our)\b",
+    re.IGNORECASE,
+)
+
+_EN_SELF_EVENT_VERB_RE = re.compile(
+    r"\b(?:have|has|had|having|got|get|getting|gotten|"
+    r"going\s+to|gonna|scheduled|booked|applied|interviewing|"
+    r"recovering|preparing\s+for|studying\s+for|"
+    r"started|starting|quit|quitting|left|leaving|moving|moved|"
+    r"just|still|already|currently|"
+    r"went|happened|finished|done|over)\b",
+    re.IGNORECASE,
+)
+
+_EN_ASSERTIVE_CUE_RE = re.compile(
+    r"\b(?:i|i'm|i've|i'd|i'll|my|me|we|we're|our|"
+    r"today|tonight|tomorrow|yesterday|"
+    r"this\s+(?:morning|afternoon|evening|week|weekend)|"
+    r"next\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"last\s+(?:night|week|month)|right\s+now|at\s+the\s+moment|"
+    r"these\s+days|lately|recently)\b",
+    re.IGNORECASE,
 )
 
 _CITIES = (
@@ -156,22 +295,46 @@ def _clauses(text: str) -> list[str]:
     return result
 
 
+def _is_mostly_ascii(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    return sum(1 for c in letters if c.isascii()) / len(letters) > 0.8
+
+
+def _term_is_event(term: str, clause: str) -> bool:
+    """Reject ambiguous English terms used in their everyday sense."""
+    gate = _AMBIGUOUS_EN.get(term.lower())
+    if gate is None:
+        return True
+    return bool(gate.search(clause))
+
+
 def _is_first_person_event_clause(clause: str, full_text: str = "") -> bool:
     if not _SENSITIVE_RE.search(clause):
         return False
     if _THIRD_PARTY_PREFIX_RE.search(clause):
         return False
-    if full_text and _THIRD_PARTY_PREFIX_RE.search(full_text) and "我" not in clause:
+    if full_text and _THIRD_PARTY_PREFIX_RE.search(full_text) and not (
+        "我" in clause or _EN_SELF_RE.search(clause)
+    ):
         return False
     if _NEGATED_OR_META_RE.search(clause):
         return False
-    if _USER_DIRECTED_RE.search(clause) and "我" not in clause:
+    if _USER_DIRECTED_RE.search(clause) and not (
+        "我" in clause or _EN_SELF_RE.search(clause)
+    ):
         return False
     if "我" in clause or "咱" in clause or "自己" in clause:
         return True
+    if _EN_SELF_RE.search(clause) and _EN_SELF_EVENT_VERB_RE.search(clause):
+        return True
     if _SELF_EVENT_VERB_RE.search(clause):
         return True
-    if full_text and _ASSERTIVE_CUE_RE.search(full_text):
+    if full_text and (
+        _ASSERTIVE_CUE_RE.search(full_text)
+        or _EN_ASSERTIVE_CUE_RE.search(full_text)
+    ):
         return True
     return False
 
@@ -187,20 +350,30 @@ def sensitive_claims(reply: str) -> list[str]:
         if not _is_first_person_event_clause(clause, full_text=text):
             continue
         for match in _SENSITIVE_RE.finditer(clause):
+            if not _term_is_event(match.group(0), clause):
+                continue
             term = _canonical_term(match.group(0))
             if term not in found:
                 found.append(term)
     if found:
         return found
     for match in _SENSITIVE_RE.finditer(text):
-        start = max(0, match.start() - 30)
-        end = min(len(text), match.end() + 12)
+        start = max(0, match.start() - 40)
+        end = min(len(text), match.end() + 16)
         window = text[start:end]
+        if not _term_is_event(match.group(0), window):
+            continue
         if _THIRD_PARTY_PREFIX_RE.search(window) or _NEGATED_OR_META_RE.search(window):
             continue
-        if _USER_DIRECTED_RE.search(window) and "我" not in window:
+        if _USER_DIRECTED_RE.search(window) and not (
+            "我" in window or _EN_SELF_RE.search(window)
+        ):
             continue
-        if _ASSERTIVE_CUE_RE.search(window) or _SELF_EVENT_VERB_RE.search(window):
+        if (
+            _ASSERTIVE_CUE_RE.search(window)
+            or _SELF_EVENT_VERB_RE.search(window)
+            or (_EN_SELF_RE.search(window) and _EN_SELF_EVENT_VERB_RE.search(window))
+        ):
             term = _canonical_term(match.group(0))
             if term not in found:
                 found.append(term)
@@ -244,7 +417,8 @@ def strip_ungrounded_events(reply: str, ungrounded: list[str] | tuple[str, ...])
                 continue
             kept_subs.append(sub)
         if kept_subs:
-            kept_lines.append("，".join(kept_subs))
+            joiner = ", " if _is_mostly_ascii(line) else "，"
+            kept_lines.append(joiner.join(kept_subs))
     return "\n".join(kept_lines).strip()
 
 
