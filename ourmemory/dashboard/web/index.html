@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ourmemory · Three-State Memory Kernel Visualizer</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #131a2a;
+      --border: #23304c;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --confirmed: #34d399;
+      --pending: #38bdf8;
+      --voided: #64748b;
+      --accent: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: #0f1524;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .orbit-confirmed { background: rgba(52,211,153,0.16); color: var(--confirmed); }
+    .orbit-pending { background: rgba(56,189,248,0.16); color: var(--pending); }
+    .orbit-voided { background: rgba(100,116,139,0.2); color: var(--voided); text-decoration: line-through; }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr 380px;
+      gap: 16px;
+      padding: 16px 24px;
+      min-height: calc(100vh - 60px);
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .card h2 {
+      margin: 0;
+      font-size: 14px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #0b101d;
+      border: 1px solid #1c2740;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: #cbd5e1;
+    }
+    input, select, button {
+      background: #0b101d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+    button {
+      cursor: pointer;
+      background: #1e293b;
+      transition: background 0.15s;
+    }
+    button:hover { background: #334155; }
+    .mem-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 520px;
+      overflow-y: auto;
+    }
+    .mem-item {
+      background: #0c1220;
+      border: 1px solid #1d2842;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .mem-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .row { display: flex; gap: 8px; align-items: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <h1>ourmemory · 三态记忆与现场画内核</h1>
+      <span id="audit-badge" class="badge orbit-confirmed">Audit Chain OK</span>
+    </div>
+    <div class="row">
+      <label for="conv-select" style="font-size:12px;color:var(--muted);">会话：</label>
+      <select id="conv-select" onchange="loadSnapshot()"></select>
+      <button onclick="loadSnapshot()">刷新</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>常驻记忆画 (Stateless Canvas)</h2>
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">核心名片 (Core Card)</div>
+        <pre id="core-card">(空)</pre>
+      </div>
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">此刻场景 (Current State)</div>
+        <pre id="state-block">(空)</pre>
+      </div>
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">今日现场画 (Scene Canvas)</div>
+        <pre id="scene-canvas">(空)</pre>
+      </div>
+      <h2>写入测试 (Observe Turn)</h2>
+      <input id="obs-user" placeholder="用户发言，如：我们去公园散步吧" />
+      <input id="obs-bot" placeholder="AI回复，如：好呀，我现在去穿鞋" />
+      <button onclick="observeTurn()">写入并演进三态轨</button>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <h2>三态记忆轨 (Confirmed / Pending / Voided)</h2>
+        <div id="orbit-counts" style="font-size:12px;color:var(--muted);"></div>
+      </div>
+      <div class="mem-list" id="mem-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>四路混合唤醒 (4-Route Hybrid Recall)</h2>
+      <div class="row">
+        <input id="search-q" style="flex:1" placeholder="输入检索问句，如：我们今天干了啥" />
+        <button onclick="runSearch()">唤醒</button>
+      </div>
+      <pre id="search-out" style="min-height:180px;">(输入问句测试四路混合检索与把握度修饰)</pre>
+      <h2>哈希审计链 (Hash-Chained Audit Log)</h2>
+      <div class="mem-list" id="audit-list" style="max-height:280px;"></div>
+    </div>
+  </div>
+
+  <script>
+    async function loadSnapshot() {
+      const sel = document.getElementById('conv-select');
+      const conv = sel.value || 'demo:companion';
+      const res = await fetch('/api/snapshot?conv_key=' + encodeURIComponent(conv));
+      const data = await res.json();
+
+      sel.innerHTML = '';
+      for (const c of data.conversations) {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        if (c === data.conv_key) opt.selected = true;
+        sel.appendChild(opt);
+      }
+
+      document.getElementById('core-card').textContent = data.core_card || '(空)';
+      document.getElementById('state-block').textContent = data.state_block || '(空)';
+      document.getElementById('scene-canvas').textContent = data.scene_canvas || '(空)';
+
+      const ab = document.getElementById('audit-badge');
+      ab.textContent = data.audit.verified
+        ? `Audit Chain OK (${data.audit.count})`
+        : 'Audit Chain Tampered!';
+      ab.className = 'badge ' + (data.audit.verified ? 'orbit-confirmed' : 'orbit-voided');
+
+      const orbits = (data.stats && data.stats.conv_orbits) || {};
+      document.getElementById('orbit-counts').textContent =
+        `确认: ${orbits.confirmed || 0} | 挂账: ${orbits.pending || 0} | 作废: ${orbits.voided || 0}`;
+
+      const list = document.getElementById('mem-list');
+      list.innerHTML = '';
+      for (const m of data.memories) {
+        const div = document.createElement('div');
+        div.className = 'mem-item';
+        const orbit = m.orbit || 'confirmed';
+        div.innerHTML = `
+          <div class="mem-meta">
+            <span>
+              <span class="badge orbit-${orbit}">${orbit}</span>
+              <span style="margin-left:6px;">${m.layer} · ${m.subject}${m.slot ? '.' + m.slot : ''}</span>
+            </span>
+            <span>
+              ${orbit === 'pending' ? `<button onclick="promoteMem('${m.id}')">转正</button>` : ''}
+              ${orbit !== 'voided' ? `<button onclick="voidMem('${m.id}')">作废</button>` : ''}
+            </span>
+          </div>
+          <div>${m.text}</div>
+        `;
+        list.appendChild(div);
+      }
+
+      const alist = document.getElementById('audit-list');
+      alist.innerHTML = '';
+      for (const a of data.audit.records) {
+        const div = document.createElement('div');
+        div.className = 'mem-item';
+        div.innerHTML = `
+          <div class="mem-meta">
+            <span>#${a.seq} · ${a.action} (${a.slot || a.memory_id.slice(0,8)})</span>
+            <span>${a.row_hash.slice(0, 10)}…</span>
+          </div>
+          <div style="font-size:12px;color:var(--muted);">${a.old_value ? a.old_value + ' → ' : ''}${a.new_value}</div>
+        `;
+        alist.appendChild(div);
+      }
+    }
+
+    async function observeTurn() {
+      const conv = document.getElementById('conv-select').value || 'demo:companion';
+      const u = document.getElementById('obs-user').value;
+      const b = document.getElementById('obs-bot').value;
+      await fetch('/api/observe', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({conv_key: conv, user_text: u, bot_text: b})
+      });
+      document.getElementById('obs-user').value = '';
+      document.getElementById('obs-bot').value = '';
+      await loadSnapshot();
+    }
+
+    async function promoteMem(id) {
+      const conv = document.getElementById('conv-select').value || 'demo:companion';
+      await fetch('/api/promote', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({conv_key: conv, memory_id: id})
+      });
+      await loadSnapshot();
+    }
+
+    async function voidMem(id) {
+      const conv = document.getElementById('conv-select').value || 'demo:companion';
+      await fetch('/api/void', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({conv_key: conv, memory_id: id})
+      });
+      await loadSnapshot();
+    }
+
+    async function runSearch() {
+      const conv = document.getElementById('conv-select').value || 'demo:companion';
+      const q = document.getElementById('search-q').value;
+      const res = await fetch('/api/search?conv_key=' + encodeURIComponent(conv) + '&q=' + encodeURIComponent(q));
+      const data = await res.json();
+      document.getElementById('search-out').textContent = data.workspace || '(无匹配记忆)';
+    }
+
+    loadSnapshot();
+  </script>
+</body>
+</html>
